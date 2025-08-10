@@ -76,7 +76,6 @@ function pickWithBounds(
   return out;
 }
 
-/** Refill-aware cap */
 function enforceBirthDeathCap(
   sel: EventItem[],
   pool: EventItem[],
@@ -144,12 +143,13 @@ const S = Annotation.Root({
 
   wiki: Annotation<EventItem[] | undefined>(),
   px: Annotation<PXItem[] | undefined>(),
+  px_india: Annotation<PXItem[] | undefined>(),
+
   merged: Annotation<EventItem[] | undefined>(),
   selected: Annotation<EventItem[] | undefined>(),
   events: Annotation<any[] | undefined>(),
 });
 
-/** ---------- Graph ---------- */
 export const app = new StateGraph(S)
   .addNode("normalizeDate", async (state) => {
     const d = parseISODateUTC(state.date);
@@ -183,11 +183,29 @@ export const app = new StateGraph(S)
     };
   })
 
+  /** India top-up if needed */
+  .addNode("indiaTopup", async (state) => {
+    const total = Math.min(Math.max(state.limit || 25, 10), 30);
+    const minIndian = Math.round(total * 0.6);
+
+    // quick count using raw PX (best-effort before verification)
+    const pxIndianGuess = (state.px || []).filter(p => /india|isro|delhi|mumbai|kolkata|chennai|british raj|lok sabha|rajya sabha|constitution of india|article 370|ram mandir|ipl|bollywood/i.test(`${p.title} ${p.note}`)).length;
+
+    if (pxIndianGuess >= minIndian) {
+      return { px_india: [] as PXItem[] };
+    }
+    // fetch an India-only PX set
+    const pxInd = await perplexityEvents(state.readableDate!, state.mm!, state.dd!, { indiaOnly: true }).catch(() => []);
+    return { px_india: pxInd as PXItem[] };
+  })
+
   .addNode("verifyAndMerge", async (state) => {
     const { mm, dd, readableDate } = state;
 
+    const pxAll: PXItem[] = [...(state.px || []), ...(state.px_india || [])];
+
     const verifiedFromPx: EventItem[] = [];
-    for (const e of (state.px || [])) {
+    for (const e of pxAll) {
       const yNum = /^\-?\d+$/.test(e.year || "") ? Number(e.year) : undefined;
       let best: EventItem | null = null, bestScore = 0;
 
@@ -205,8 +223,6 @@ export const app = new StateGraph(S)
       if (!gate.ok) continue;
 
       const yr = best.year ?? e.year ?? "";
-
-      // Only set day if verified
       const date_iso = gate.iso ?? null;
       const disp = gate.iso ? readableDate : undefined;
 
@@ -223,14 +239,11 @@ export const app = new StateGraph(S)
         display_date: disp,
         verified_day: Boolean(gate.iso),
         is_indian: false,
-        // ✅ source from the field we already keep
         sources: { wikipedia_page: (best.sources && best.sources.wikipedia_page) ? best.sources.wikipedia_page : null },
         px_rank: e.px_rank,
       };
 
-      // Indian flag (anchor or high score)
       prelim.is_indian = classifyIndian(`${rawTitle} ${rawText}`);
-
       prelim.score = scoreEvent(prelim);
       verifiedFromPx.push(prelim);
     }
@@ -241,14 +254,10 @@ export const app = new StateGraph(S)
           const isTreaty =
             /treaty|accord|agreement/i.test(w.title) ||
             /treaty|accord|agreement/i.test(w.text || "");
-
-          // Strict only for treaties; lenient for others
           const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, isTreaty);
           if (!gate.ok && isTreaty) return null;
 
           const yr = w.year ?? "";
-
-          // Only set day if verified
           const date_iso = gate.iso ?? null;
           const disp = gate.iso ? readableDate : undefined;
 
@@ -262,7 +271,6 @@ export const app = new StateGraph(S)
             display_date: disp,
             verified_day: Boolean(gate.iso),
             is_indian: false,
-            // ✅ use sources.wikipedia_page correctly
             sources: { wikipedia_page: (w.sources && w.sources.wikipedia_page) ? w.sources.wikipedia_page : null },
             px_rank: undefined,
           };
@@ -309,7 +317,7 @@ export const app = new StateGraph(S)
 
   .addNode("enrich", async (state) => {
     const pxNotes = new Map(
-      (state.px || []).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
+      ([...(state.px || []), ...(state.px_india || [])]).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
     );
 
     const enriched = await Promise.all(
@@ -328,7 +336,8 @@ export const app = new StateGraph(S)
   })
 
   .addEdge("normalizeDate", "fetchInParallel")
-  .addEdge("fetchInParallel", "verifyAndMerge")
+  .addEdge("fetchInParallel", "indiaTopup")
+  .addEdge("indiaTopup", "verifyAndMerge")
   .addEdge("verifyAndMerge", "selectEnforce")
   .addEdge("selectEnforce", "enrich")
   .addEdge("enrich", END)
