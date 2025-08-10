@@ -115,4 +115,17 @@ export function semanticTitle(kind: "event"|"birth"|"death", rawTitle: string, r
   if (kind === "death") return `Death of ${base}`;
   if (/battle of/i.test(rawTitle)) return stripParens(rawTitle);
   if (/treaty|accord|agreement/i.test(rawTitle) || /treaty|accord|agreement|signed/i.test(text)) {
-    retu
+    return /signed/.test(text) ? `${base} signed` : base;
+  }
+  if (/independence|declared independence|proclaimed/i.test(text) || /independence/i.test(rawTitle)) {
+    return `Independence of ${base}`.replace(/^Independence of Independence of/i, "Independence of");
+  }
+  if (/assassin|assassinated|assassination/.test(text)) return `Assassination of ${base}`;
+  if (/launched?|launch|inaugurat/.test(text)) return `Launch of ${base}`;
+  if (/founded|establish|formed|create/.test(text)) return `Founding of ${base}`;
+  if (/begins|began|start|started|commence/.test(text)) return `Start of ${base}`;
+  if (/wins|won|victory|defeat/.test(text)) return `Victory: ${base}`;
+  if (/elected|sworn in|inaugurat/.test(text)) return `Swearing-in/Election of ${base}`;
+  if (/earthquake|cyclone|flood|tsunami|explosion|bomb/.test(text)) return `Major event: ${base}`;
+  return `Event: ${base}`;
+}
