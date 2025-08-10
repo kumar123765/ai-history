@@ -1,4 +1,4 @@
-import { StateGraph, END } from "@langchain/langgraph";
+import { StateGraph, Annotation, END } from "@langchain/langgraph";
 import { EventItem, PXItem } from "./types.js";
 import {
   parseISODateUTC,
@@ -17,19 +17,7 @@ import {
 import { perplexityEvents } from "./helpers/px.js";
 import { scoreEvent, semanticTitle } from "./helpers/signals.js";
 
-type S = {
-  date: string;
-  limit: number;
-  mm?: string;
-  dd?: string;
-  readableDate?: string;
-  wiki?: EventItem[];
-  px?: PXItem[];
-  merged?: EventItem[];
-  selected?: EventItem[];
-  events?: any[];
-};
-
+/** ---------- Helpers (unchanged) ---------- */
 function pickWithBounds(
   events: EventItem[],
   total: number,
@@ -143,18 +131,36 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
   return trimmed;
 }
 
-export const app = new StateGraph<S>({ channels: {} })
-  .addNode("normalizeDate", async (s) => {
-    const d = parseISODateUTC(s.date);
-    s.mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-    s.dd = String(d.getUTCDate()).padStart(2, "0");
-    s.readableDate = `${monthsFull[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    return s;
-  })
-  .addNode("fetchInParallel", async (s) => {
-    // Hard timeout guard (best-effort)
-    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 8000);
+/** ---------- LangGraph v0.4 State (Annotations) ---------- */
+const S = Annotation.Root({
+  date: Annotation<string>(),
+  limit: Annotation<number>(),
 
+  mm: Annotation<string | undefined>(),
+  dd: Annotation<string | undefined>(),
+  readableDate: Annotation<string | undefined>(),
+
+  wiki: Annotation<EventItem[] | undefined>(),
+  px: Annotation<PXItem[] | undefined>(),
+  merged: Annotation<EventItem[] | undefined>(),
+  selected: Annotation<EventItem[] | undefined>(),
+  events: Annotation<any[] | undefined>(),
+});
+
+/** ---------- Graph ---------- */
+export const app = new StateGraph(S)
+  .addNode("normalizeDate", async (state) => {
+    // return only updates, not full state
+    const d = parseISODateUTC(state.date);
+    return {
+      mm: String(d.getUTCMonth() + 1).padStart(2, "0"),
+      dd: String(d.getUTCDate()).padStart(2, "0"),
+      readableDate: `${monthsFull[d.getUTCMonth()]} ${d.getUTCDate()}`,
+    };
+  })
+
+  .addNode("fetchInParallel", async (state) => {
+    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 8000);
     const withTimeout = <T>(p: Promise<T>) =>
       Promise.race<T>([
         p,
@@ -164,32 +170,31 @@ export const app = new StateGraph<S>({ channels: {} })
       ]);
 
     const [ev, br, de, px] = await Promise.all([
-      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "events")).catch(() => ({ events: [] })),
-      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "births")).catch(() => ({ births: [] })),
-      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "deaths")).catch(() => ({ deaths: [] })),
-      withTimeout(perplexityEvents(s.readableDate!, s.mm!, s.dd!)).catch(() => []),
+      withTimeout(wikiOnThisDay(state.mm!, state.dd!, "events")).catch(() => ({ events: [] })),
+      withTimeout(wikiOnThisDay(state.mm!, state.dd!, "births")).catch(() => ({ births: [] })),
+      withTimeout(wikiOnThisDay(state.mm!, state.dd!, "deaths")).catch(() => ({ deaths: [] })),
+      withTimeout(perplexityEvents(state.readableDate!, state.mm!, state.dd!)).catch(() => []),
     ]);
 
-    s.wiki = extractWikiList(ev, br, de);
-    s.px = px as PXItem[];
-    return s;
+    return {
+      wiki: extractWikiList(ev, br, de),
+      px: px as PXItem[],
+    };
   })
-  .addNode("verifyAndMerge", async (s) => {
-    const { mm, dd, readableDate } = s;
+
+  .addNode("verifyAndMerge", async (state) => {
+    const { mm, dd, readableDate } = state;
 
     const verifiedFromPx: EventItem[] = [];
-    for (const e of s.px || []) {
+    for (const e of state.px || []) {
       const yNum = /^\-?\d+$/.test(e.year || "") ? Number(e.year) : undefined;
       let best: EventItem | null = null,
         bestScore = 0;
 
-      for (const w of s.wiki || []) {
+      for (const w of state.wiki || []) {
         if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum)
           continue;
-        const score = Math.max(
-          jaccard(e.title, w.title),
-          jaccard(e.title, w.text || "")
-        );
+        const score = Math.max(jaccard(e.title, w.title), jaccard(e.title, w.text || ""));
         if (score > bestScore) {
           bestScore = score;
           best = w;
@@ -200,13 +205,7 @@ export const app = new StateGraph<S>({ channels: {} })
       const strict =
         /treaty|accord|agreement/i.test(best.title) ||
         /treaty|accord|agreement/i.test(best.text || "");
-      const gate = await requireDateConsensus(
-        best.title || e.title,
-        best.kind,
-        mm!,
-        dd!,
-        strict
-      );
+      const gate = await requireDateConsensus(best.title || e.title, best.kind, mm!, dd!, strict);
       if (!gate.ok) continue;
 
       const yr = best.year ?? e.year ?? "";
@@ -243,7 +242,7 @@ export const app = new StateGraph<S>({ channels: {} })
 
     const wikiDirect = (
       await Promise.all(
-        (s.wiki || []).map(async (w) => {
+        (state.wiki || []).map(async (w) => {
           const strict =
             /treaty|accord|agreement/i.test(w.title) ||
             /treaty|accord|agreement/i.test(w.text || "");
@@ -290,64 +289,67 @@ export const app = new StateGraph<S>({ channels: {} })
             e.year &&
             o.year &&
             String(e.year) === String(o.year) &&
-            jaccard(
-              stripKnownPrefixAll(e.title),
-              stripKnownPrefixAll(o.title)
-            ) > 0.72
+            jaccard(stripKnownPrefixAll(e.title), stripKnownPrefixAll(o.title)) > 0.72
         ) || null;
       if (!dup) out.push(e);
     }
 
-    s.merged = out.sort((a, b) => {
+    out.sort((a, b) => {
       const ap = a.px_rank ? 0 : 1,
         bp = b.px_rank ? 0 : 1;
       return ap !== bp ? ap - bp : (b.score || 0) - (a.score || 0);
     });
-    return s;
+
+    // return partial update
+    return { merged: out };
   })
-  .addNode("selectEnforce", async (s) => {
-    const total = Math.min(Math.max(s.limit || 25, 10), 30);
+
+  .addNode("selectEnforce", async (state) => {
+    const total = Math.min(Math.max(state.limit || 25, 10), 30);
     const minI = Math.round(total * 0.6),
       maxI = Math.round(total * 0.8);
 
-    let sel = pickWithBounds(s.merged || [], total, minI, maxI);
-    sel = enforceBirthDeathCap(sel, s.merged || [], 6);
-    sel = enforceBattleCap(sel, s.merged || [], 3);
+    let sel = pickWithBounds(state.merged || [], total, minI, maxI);
+    sel = enforceBirthDeathCap(sel, state.merged || [], 6);
+    sel = enforceBattleCap(sel, state.merged || [], 3);
 
-    s.selected = sel;
-    return s;
+    return { selected: sel };
   })
-  .addNode("enrich", async (s) => {
+
+  .addNode("enrich", async (state) => {
     const pxNotes = new Map(
-      (s.px || []).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
+      (state.px || []).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
     );
 
-    s.events = await Promise.all(
-      (s.selected || []).map(async (e) => {
+    const enriched = await Promise.all(
+      (state.selected || []).map(async (e) => {
         const guess = stripKnownPrefixAll(e.title);
         const sum = await wikiSummaryByTitle(guess).catch(() => null);
-        if (sum && sum.length > (e.summary?.length || 0))
-          e.summary = trimSummary(sum);
+        if (sum && sum.length > (e.summary?.length || 0)) e.summary = trimSummary(sum);
         const note = pxNotes.get(norm(guess));
         if (note && (e.summary || "").length < 240)
           e.summary = trimSummary(`${e.summary || ""} ${note}`);
         return e;
       })
     );
-    return s;
+
+    return { events: enriched };
   })
-  // normal edges
+
+  // Edges
   .addEdge("normalizeDate", "fetchInParallel")
   .addEdge("fetchInParallel", "verifyAndMerge")
   .addEdge("verifyAndMerge", "selectEnforce")
   .addEdge("selectEnforce", "enrich")
   .addEdge("enrich", END)
-  // explicit entry point (fixes UnreachableNodeError)
+
+  // Explicit entry
   .setEntryPoint("normalizeDate")
   .compile();
 
+/** ---------- Public runner ---------- */
 export async function runEventsFlow(date: string, limit = 25) {
-  const result = await app.invoke({ date, limit } as S);
+  const result = await app.invoke({ date, limit });
   const events = (result.events || []).map((e: any) => ({
     title: e.title,
     summary: e.summary,
