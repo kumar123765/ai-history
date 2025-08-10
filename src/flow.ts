@@ -15,9 +15,14 @@ import {
   wikiSummaryByTitle,
 } from "./helpers/wiki.js";
 import { perplexityEvents } from "./helpers/px.js";
-import { scoreEvent, semanticTitle } from "./helpers/signals.js";
+import {
+  scoreEvent,
+  semanticTitle,
+  indianSignalScore,
+  isIndianText,
+} from "./helpers/signals.js";
 
-/** ---------- Helpers ---------- */
+/** ---------- Selector helpers ---------- */
 function pickWithBounds(
   events: EventItem[],
   total: number,
@@ -31,10 +36,7 @@ function pickWithBounds(
     .filter((e) => !e.is_indian)
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
-  let indianTarget = Math.max(
-    indianMin,
-    Math.min(indianMax, Math.round(total * 0.6))
-  );
+  let indianTarget = Math.max(indianMin, Math.min(indianMax, Math.round(total * 0.6)));
 
   let out = [
     ...indianAll.slice(0, indianTarget),
@@ -45,9 +47,7 @@ function pickWithBounds(
 
   if (curIndian < indianMin) {
     const needed = indianMin - curIndian;
-    const candidates = indianAll
-      .filter((e) => !out.includes(e))
-      .slice(0, needed);
+    const candidates = indianAll.filter((e) => !out.includes(e)).slice(0, needed);
     out.push(...candidates);
     out = out.sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, total);
     curIndian = out.filter((e) => e.is_indian).length;
@@ -55,9 +55,7 @@ function pickWithBounds(
 
   if (curIndian > indianMax) {
     const excess = curIndian - indianMax;
-    const globalsLeft = globalAll
-      .filter((e) => !out.includes(e))
-      .slice(0, excess);
+    const globalsLeft = globalAll.filter((e) => !out.includes(e)).slice(0, excess);
     let removed = 0;
     out = out
       .sort((a, b) => (a.score || 0) - (b.score || 0))
@@ -79,7 +77,7 @@ function pickWithBounds(
   return out;
 }
 
-/** Refill-aware cap: guarantees we top back up to targetTotal */
+/** Refill-aware cap */
 function enforceBirthDeathCap(
   sel: EventItem[],
   pool: EventItem[],
@@ -126,10 +124,7 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
   const inKey = (e: EventItem) => e.title + "|" + e.year;
   const selectedKeys = new Set(trimmed.map(inKey));
   const nonBattlePool = pool
-    .filter(
-      (e) =>
-        e.kind === "event" && !selectedKeys.has(inKey(e)) && !isBattle(e)
-    )
+    .filter((e) => e.kind === "event" && !selectedKeys.has(inKey(e)) && !isBattle(e))
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   for (const cand of nonBattlePool) {
@@ -199,8 +194,7 @@ export const app = new StateGraph(S)
         bestScore = 0;
 
       for (const w of state.wiki || []) {
-        if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum)
-          continue;
+        if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum) continue;
         const score = Math.max(jaccard(e.title, w.title), jaccard(e.title, w.text || ""));
         if (score > bestScore) {
           bestScore = score;
@@ -216,17 +210,10 @@ export const app = new StateGraph(S)
       if (!gate.ok) continue;
 
       const yr = best.year ?? e.year ?? "";
-      const date_iso = gate.iso
-        ? gate.iso
-        : yr && /^\d+$/.test(yr) && Number(yr) > 0
-        ? `${yr}-${mm}-${dd}`
-        : null;
-      const disp =
-        yr && /^\-?\d+$/.test(yr) && Number(yr) > 0
-          ? `${readableDate}, ${yr}`
-          : yr && /^\-?\d+$/.test(yr) && Number(yr) < 0
-          ? `${readableDate}, ${Math.abs(Number(yr))} BCE`
-          : readableDate;
+
+      // ✅ Only set day if verified
+      const date_iso = gate.iso ?? null;
+      const disp = gate.iso ? readableDate : undefined;
 
       const rawTitle = best.title || e.title;
       const rawText = best.text || e.note || "";
@@ -239,10 +226,16 @@ export const app = new StateGraph(S)
         summary: trimSummary((best.text || "") + (e.note ? ` ${e.note}` : "")),
         date_iso,
         display_date: disp,
-        is_indian: undefined,
+        verified_day: Boolean(gate.iso),
+        is_indian: undefined, // set below
         sources: { wikipedia_page: (best as any).pageUrl ?? null },
         px_rank: e.px_rank,
       };
+
+      // ✅ Indian flag
+      const indScore = indianSignalScore(`${rawTitle} ${rawText}`);
+      prelim.is_indian = isIndianText(`${rawTitle} ${rawText}`) || indScore >= 15;
+
       prelim.score = scoreEvent(prelim);
       verifiedFromPx.push(prelim);
     }
@@ -256,22 +249,13 @@ export const app = new StateGraph(S)
 
           // Strict only for treaties; lenient for others
           const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, isTreaty);
-
-          // If it’s a treaty and mismatch => drop it. Otherwise keep it.
           if (!gate.ok && isTreaty) return null;
 
           const yr = w.year ?? "";
-          const date_iso = gate.iso
-            ? gate.iso
-            : yr && /^\d+$/.test(yr) && Number(yr) > 0
-            ? `${yr}-${mm}-${dd}`
-            : null;
-          const disp =
-            yr && /^\-?\d+$/.test(yr) && Number(yr) > 0
-              ? `${readableDate}, ${yr}`
-              : yr && /^\-?\d+$/.test(yr) && Number(yr) < 0
-              ? `${readableDate}, ${Math.abs(Number(yr))} BCE`
-              : readableDate;
+
+          // ✅ Only set day if verified
+          const date_iso = gate.iso ?? null;
+          const disp = gate.iso ? readableDate : undefined;
 
           const semTitle = semanticTitle(w.kind, w.title, w.text || "");
           const prelim: EventItem = {
@@ -281,10 +265,16 @@ export const app = new StateGraph(S)
             summary: trimSummary(w.text || ""),
             date_iso,
             display_date: disp,
-            is_indian: undefined,
+            verified_day: Boolean(gate.iso),
+            is_indian: undefined, // set below
             sources: { wikipedia_page: (w as any).pageUrl ?? null },
             px_rank: undefined,
           };
+
+          // ✅ Indian flag
+          const indScore = indianSignalScore(`${w.title} ${w.text || ""}`);
+          prelim.is_indian = isIndianText(`${w.title} ${w.text || ""}`) || indScore >= 15;
+
           prelim.score = scoreEvent(prelim);
           return prelim;
         })
@@ -320,7 +310,7 @@ export const app = new StateGraph(S)
       maxI = Math.round(total * 0.8);
 
     let sel = pickWithBounds(state.merged || [], total, minI, maxI);
-    sel = enforceBirthDeathCap(sel, state.merged || [], 6, total); // refill up to total
+    sel = enforceBirthDeathCap(sel, state.merged || [], 6, total);
     sel = enforceBattleCap(sel, state.merged || [], 3);
 
     return { selected: sel };
@@ -353,7 +343,7 @@ export const app = new StateGraph(S)
   .addEdge("selectEnforce", "enrich")
   .addEdge("enrich", END)
 
-  // Explicit entry
+  // Entry
   .setEntryPoint("normalizeDate")
   .compile();
 
@@ -368,6 +358,7 @@ export async function runEventsFlow(date: string, limit = 25) {
     year: e.year,
     kind: e.kind,
     is_indian: e.is_indian,
+    verified_day: e.verified_day,
     score: e.score,
     sources: e.sources,
   }));
@@ -384,3 +375,4 @@ export async function runEventsFlow(date: string, limit = 25) {
     events,
   };
 }
+
