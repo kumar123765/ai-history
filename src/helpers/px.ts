@@ -1,8 +1,12 @@
-// deno-lint-ignore-file no-explicit-any
-import { norm } from "./utils.js";
-import type { PXItem } from "../types.js";
+// src/helpers/px.ts
+export type PXItem = {
+  px_rank: number;
+  title: string;
+  year: string;
+  note: string;
+};
 
-function tryParseObj(text: string): any | null {
+function tryParseObj(text: string) {
   try {
     return JSON.parse(text);
   } catch {
@@ -11,7 +15,6 @@ function tryParseObj(text: string): any | null {
     try { return JSON.parse(m[0]); } catch { return null; }
   }
 }
-
 function parseMarkdownToEvents(text: string) {
   const lines = text.split(/\r?\n/);
   const out: PXItem[] = [];
@@ -34,46 +37,57 @@ function parseMarkdownToEvents(text: string) {
   return out;
 }
 
-export async function perplexityEvents(readableDate: string, mm: string, dd: string): Promise<PXItem[]> {
+export async function perplexityEvents(
+  readableDate: string,
+  mm: string,
+  dd: string,
+  opts?: { indiaOnly?: boolean }
+): Promise<PXItem[]> {
   const key = process.env.PERPLEXITY_API_KEY;
   if (!key) return [];
 
-  const schema = `Return MINIFIED JSON ONLY EXACTLY like: {"events":[{"year":"YYYY or -YY","title":"...","note":"why newsworthy"}]}`;
-  const basePrompt = `${schema}
+  const schemaHint = `Return MINIFIED JSON ONLY EXACTLY like:
+{"events":[{"year":"YYYY or -YY","title":"...","note":"why newsworthy (no dates)"}]}`;
+
+  const indianRule = opts?.indiaOnly
+    ? `STRICT: Return ONLY Indian events (India, ISRO, Parliament of India, Supreme Court of India, Indian states/cities, Indian leaders, major Indian sports/culture).
+- 25 items if possible; if fewer exist for ${mm}-${dd}, include the most historically notable.
+- Exclude medieval European battles unless they directly involve India.`
+    : `Indian items must be 60–80% overall: constitutional/Supreme Court (Article 370, Sec 377, Right to Privacy), ISRO (Chandrayaan/MOM), economic policy (GST, demonetisation), elections/democracy milestones, national observances, major cultural/sport achievements.
+Include major global items (treaties, space, Nobel, Olympics/records). Strongly de-emphasise medieval battles unless highly consequential. 20–30 items total.`;
+
+  const basePrompt = `${schemaHint}
 Date: ${readableDate} (${mm}-${dd})
 Rules:
-- Prioritize Indian items (60–80%) across constitutional/Supreme Court, ISRO, economy (GST/demonetisation), elections, cultural/sports milestones.
-- Include major global items (treaties, space, Nobel, Olympics/records).
-- Strongly de-emphasise medieval battles unless highly consequential.
-- 20–30 items total.`;
+- ${indianRule}`;
 
-  async function call(prompt: string) {
+  async function callPerplexity(prompt: string) {
     const res = await fetch("https://api.perplexity.ai/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "sonar-pro",
         temperature: 0.1,
-        max_tokens: 2200,
+        max_tokens: 3000,
         messages: [
           { role: "system", content: "You output VALID MINIFIED JSON only. No markdown, no prose." },
-          { role: "user", content: prompt },
-        ],
-      }),
+          { role: "user", content: prompt }
+        ]
+      })
     });
     if (!res.ok) return null;
     return res.json().catch(() => null);
   }
 
-  const j1 = await call(basePrompt);
+  const j1 = await callPerplexity(basePrompt);
   const content1 = j1?.choices?.[0]?.message?.content?.trim() || "";
   let obj = tryParseObj(content1);
 
   if (!obj || !Array.isArray(obj.events)) {
-    const j2 = await call(schema);
+    const j2 = await callPerplexity(`${schemaHint}\nONLY return the JSON object. No words.`);
     const content2 = j2?.choices?.[0]?.message?.content?.trim() || "";
     obj = tryParseObj(content2);
     if (!obj || !Array.isArray(obj.events)) {
@@ -83,15 +97,10 @@ Rules:
     }
   }
 
-  const out: PXItem[] = (obj.events || [])
-    .slice(0, 36)
-    .map((e: any, i: number) => ({
-      px_rank: i + 1,
-      title: String(e?.title || "").trim(),
-      year: String(e?.year ?? "").trim(),
-      note: String(e?.note || "").trim(),
-    }))
-    .filter((e: PXItem) => e.title);
-
-  return out;
+  return obj.events.slice(0, 36).map((e: any, i: number) => ({
+    px_rank: i + 1,
+    title: String(e?.title || "").trim(),
+    year: String(e?.year ?? "").trim(),
+    note: String(e?.note || "").trim(),
+  })).filter((e: PXItem) => e.title);
 }
