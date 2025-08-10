@@ -1,8 +1,24 @@
-import { wikiOnThisDay, wikiSummaryByTitle, articleDateAuditISO, pickTitleFromPage, pageUrlFromItem,
-  OnThisDayEvents, OnThisDayBirths, OnThisDayDeaths } from "./helpers/wiki.js";
 import {
-  monthsFull, parseISODateUTC, norm, stripKnownPrefixAll, jaccard, trimSummary,
-  isIndianText, indianSignalScore, isoToDisplay, stripHtml
+  wikiOnThisDay,
+  wikiSummaryByTitle,
+  articleDateAuditISO,
+  pickTitleFromPage,
+  pageUrlFromItem,
+  OnThisDayEvents,
+  OnThisDayBirths,
+  OnThisDayDeaths,
+} from "./helpers/wiki.js";
+import {
+  monthsFull,
+  parseISODateUTC,
+  norm,
+  stripKnownPrefixAll,
+  jaccard,
+  trimSummary,
+  isIndianText,
+  indianSignalScore,
+  isoToDisplay,
+  stripHtml,
 } from "./helpers/utils.js";
 
 type Kind = "event" | "birth" | "death";
@@ -54,14 +70,29 @@ function semanticTitle(kind: Kind, rawTitle: string, rawText: string) {
   return `Event: ${base}`;
 }
 
-function baseScore(e: { title: string; summary: string; kind: Kind; year: number | null; is_indian: boolean; }): number {
+/** accept string | number | null to avoid TS errors */
+function baseScore(e: {
+  title: string;
+  summary: string;
+  kind: Kind;
+  year: number | string | null;
+  is_indian: boolean;
+}): number {
   let s = 45;
+
+  // Coerce year if needed
+  const y = typeof e.year === "string" ? parseInt(e.year, 10) : e.year;
+
   s += indianSignalScore(`${e.title} ${e.summary}`);
   if (e.summary.length > 180) s += 4;
-  if (e.year && e.year < 1900) s += 2;
+  if (y && y < 1900) s += 2;
   if (e.kind === "birth" || e.kind === "death") s -= 4;
-  const isBattle = /\b(battle|siege|crusade|skirmish)\b/i.test(e.title) || /\b(battle|siege|crusade|skirmish)\b/i.test(e.summary);
+
+  const isBattle =
+    /\b(battle|siege|crusade|skirmish)\b/i.test(e.title) ||
+    /\b(battle|siege|crusade|skirmish)\b/i.test(e.summary);
   if (isBattle && !e.is_indian) s -= 8;
+
   return Math.max(0, Math.min(100, s));
 }
 
@@ -74,7 +105,9 @@ function enforceCaps(items: OutputEvent[], limit: number): OutputEvent[] {
     items = items.filter((e) => !rm.has(e.title + "|" + e.year));
   }
   // battle cap
-  const battles = items.filter((e) => /\b(battle|siege|crusade|skirmish)\b/i.test(e.title) || /\b(battle|siege|crusade|skirmish)\b/i.test(e.summary));
+  const battles = items.filter(
+    (e) => /\b(battle|siege|crusade|skirmish)\b/i.test(e.title) || /\b(battle|siege|crusade|skirmish)\b/i.test(e.summary)
+  );
   if (battles.length > BATTLE_MAX) {
     const toRemove = battles.sort((a, b) => a.score - b.score).slice(0, battles.length - BATTLE_MAX);
     const rm = new Set(toRemove.map((e) => e.title + "|" + e.year));
@@ -92,28 +125,28 @@ function retargetIndianShare(items: OutputEvent[], limit: number, low = INDIAN_L
 
   let out: OutputEvent[] = [];
 
-  // Try to hit the middle of the band
+  // Aim mid-band
   const desiredIndian = Math.min(Math.max(targetLow, Math.round(limit * ((low + high) / 2))), targetHigh);
   out.push(...indian.slice(0, Math.min(desiredIndian, indian.length)));
   out.push(...global.slice(0, limit - out.length));
 
-  // If still below low, top up with more Indian
+  // If still below low, top-up with Indian replacing weakest globals
   while (out.filter((e) => e.is_indian).length < targetLow) {
     const next = indian.find((x) => !out.includes(x));
     if (!next) break;
-    // replace weakest global
     const weakestGlobalIdx = out.findIndex((e) => !e.is_indian);
     if (weakestGlobalIdx >= 0) out.splice(weakestGlobalIdx, 1, next);
     else out.push(next);
     if (out.length > limit) out = out.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
-  // Cap if above high
+  // If above high, swap weakest Indian for next global
   while (out.filter((e) => e.is_indian).length > targetHigh) {
-    const weakestIndianIdx = out
-      .map((e, i) => ({ e, i }))
-      .filter((x) => x.e.is_indian)
-      .sort((a, b) => a.e.score - b.e.score)[0]?.i ?? -1;
+    const weakestIndianIdx =
+      out
+        .map((e, i) => ({ e, i }))
+        .filter((x) => x.e.is_indian)
+        .sort((a, b) => a.e.score - b.e.score)[0]?.i ?? -1;
     const nextGlobal = global.find((g) => !out.includes(g));
     if (weakestIndianIdx >= 0 && nextGlobal) out.splice(weakestIndianIdx, 1, nextGlobal);
     else break;
@@ -126,7 +159,7 @@ async function fetchAllWiki(mm: string, dd: string) {
   const [ev, br, de] = await Promise.all([
     wikiOnThisDay(mm, dd, "events") as Promise<OnThisDayEvents>,
     wikiOnThisDay(mm, dd, "births") as Promise<OnThisDayBirths>,
-    wikiOnThisDay(mm, dd, "deaths") as Promise<OnThisDayDeaths>
+    wikiOnThisDay(mm, dd, "deaths") as Promise<OnThisDayDeaths>,
   ]);
 
   const uni: Unified[] = [];
@@ -186,14 +219,13 @@ export async function runFlow(input: { date?: string; limit?: number }) {
     if (w.title) {
       const aud = await articleDateAuditISO(stripHtml(stripKnownPrefixAll(w.title)));
       if (aud.iso) {
-        // only mark verified if day/month match
         if (aud.iso.slice(5, 7) === mm && aud.iso.slice(8, 10) === dd) {
           date_iso = aud.iso;
           verified_day = true;
         }
       }
     }
-    // If still not set but we have a positive year, we can form YYYY-mm-dd (we keep verified_day=false)
+    // Fallback YYYY-mm-dd if year is known (not verified)
     if (!date_iso && w.year && w.year > 0) {
       date_iso = `${String(w.year).padStart(4, "0")}-${mm}-${dd}`;
     }
@@ -212,8 +244,8 @@ export async function runFlow(input: { date?: string; limit?: number }) {
       kind: w.kind,
       is_indian: isIndian,
       verified_day,
-      score: 0, // filled next
-      sources: { wikipedia_page: w.pageUrl }
+      score: 0,
+      sources: { wikipedia_page: w.pageUrl },
     };
     e.score = baseScore(e);
     enriched.push(e);
@@ -222,7 +254,7 @@ export async function runFlow(input: { date?: string; limit?: number }) {
   // Sort by score desc
   let sorted = enriched.sort((a, b) => b.score - a.score);
 
-  // Keep top N candidates before enforcing mix
+  // Keep wider pool before enforcing mix
   sorted = sorted.slice(0, Math.max(limit * 2, limit + 10));
 
   // Enforce caps
@@ -236,18 +268,18 @@ export async function runFlow(input: { date?: string; limit?: number }) {
     indian: selected.filter((x) => x.is_indian).length,
     global: selected.filter((x) => !x.is_indian).length,
     births_deaths: selected.filter((x) => x.kind === "birth" || x.kind === "death").length,
-    battles: selected.filter((x) => /\b(battle|siege|crusade|skirmish)\b/i.test(x.title)).length
+    battles: selected.filter((x) => /\b(battle|siege|crusade|skirmish)\b/i.test(x.title)).length,
   };
 
   return {
     success: true,
     date: dateStr,
     totals,
-    events: selected
+    events: selected,
   };
 }
 
-// Backwards-compatible name if your caller imports runEventsFlow
+// Back-compat name if your caller imports runEventsFlow
 export async function runEventsFlow(input: { date?: string; limit?: number }) {
   return runFlow(input);
 }
