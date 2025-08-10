@@ -17,7 +17,7 @@ import {
 import { perplexityEvents } from "./helpers/px.js";
 import { scoreEvent, semanticTitle } from "./helpers/signals.js";
 
-/** ---------- Helpers (unchanged) ---------- */
+/** ---------- Helpers ---------- */
 function pickWithBounds(
   events: EventItem[],
   total: number,
@@ -79,24 +79,32 @@ function pickWithBounds(
   return out;
 }
 
-function enforceBirthDeathCap(sel: EventItem[], pool: EventItem[], cap: number) {
-  const bd = sel.filter((e) => e.kind === "birth" || e.kind === "death");
-  if (bd.length <= cap) return sel;
+/** Refill-aware cap: guarantees we top back up to targetTotal */
+function enforceBirthDeathCap(
+  sel: EventItem[],
+  pool: EventItem[],
+  cap: number,
+  targetTotal: number
+) {
+  const birthsDeaths = sel.filter((e) => e.kind === "birth" || e.kind === "death");
+  if (birthsDeaths.length <= cap) return sel;
 
-  const toRemove = bd
+  const toRemove = birthsDeaths
     .sort((a, b) => (a.score || 0) - (b.score || 0))
-    .slice(0, bd.length - cap);
-  const rem = new Set(toRemove.map((e) => e.title + "|" + e.year));
-  let trimmed = sel.filter((e) => !rem.has(e.title + "|" + e.year));
+    .slice(0, birthsDeaths.length - cap);
+  const removeSet = new Set(toRemove.map((e) => e.title + "|" + e.year));
+
+  let trimmed = sel.filter((e) => !removeSet.has(e.title + "|" + e.year));
 
   const inKey = (e: EventItem) => e.title + "|" + e.year;
   const selectedKeys = new Set(trimmed.map(inKey));
+
   const eventPool = pool
     .filter((e) => e.kind === "event" && !selectedKeys.has(inKey(e)))
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   for (const cand of eventPool) {
-    if (trimmed.length >= sel.length) break;
+    if (trimmed.length >= targetTotal) break;
     trimmed.push(cand);
   }
   return trimmed;
@@ -131,7 +139,7 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
   return trimmed;
 }
 
-/** ---------- LangGraph v0.4 State (Annotations) ---------- */
+/** ---------- LangGraph v0.4 State ---------- */
 const S = Annotation.Root({
   date: Annotation<string>(),
   limit: Annotation<number>(),
@@ -150,7 +158,6 @@ const S = Annotation.Root({
 /** ---------- Graph ---------- */
 export const app = new StateGraph(S)
   .addNode("normalizeDate", async (state) => {
-    // return only updates, not full state
     const d = parseISODateUTC(state.date);
     return {
       mm: String(d.getUTCMonth() + 1).padStart(2, "0"),
@@ -160,7 +167,7 @@ export const app = new StateGraph(S)
   })
 
   .addNode("fetchInParallel", async (state) => {
-    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 8000);
+    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 12000);
     const withTimeout = <T>(p: Promise<T>) =>
       Promise.race<T>([
         p,
@@ -300,7 +307,6 @@ export const app = new StateGraph(S)
       return ap !== bp ? ap - bp : (b.score || 0) - (a.score || 0);
     });
 
-    // return partial update
     return { merged: out };
   })
 
@@ -310,7 +316,7 @@ export const app = new StateGraph(S)
       maxI = Math.round(total * 0.8);
 
     let sel = pickWithBounds(state.merged || [], total, minI, maxI);
-    sel = enforceBirthDeathCap(sel, state.merged || [], 6);
+    sel = enforceBirthDeathCap(sel, state.merged || [], 6, total); // refill up to total
     sel = enforceBattleCap(sel, state.merged || [], 3);
 
     return { selected: sel };
