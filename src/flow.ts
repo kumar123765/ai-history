@@ -167,7 +167,7 @@ export const app = new StateGraph(S)
   })
 
   .addNode("fetchInParallel", async (state) => {
-    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 12000);
+    const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 15000);
     const withTimeout = <T>(p: Promise<T>) =>
       Promise.race<T>([
         p,
@@ -250,11 +250,15 @@ export const app = new StateGraph(S)
     const wikiDirect = (
       await Promise.all(
         (state.wiki || []).map(async (w) => {
-          const strict =
+          const isTreaty =
             /treaty|accord|agreement/i.test(w.title) ||
             /treaty|accord|agreement/i.test(w.text || "");
-          const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, strict);
-          if (!gate.ok) return null;
+
+          // Strict only for treaties; lenient for others
+          const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, isTreaty);
+
+          // If it’s a treaty and mismatch => drop it. Otherwise keep it.
+          if (!gate.ok && isTreaty) return null;
 
           const yr = w.year ?? "";
           const date_iso = gate.iso
