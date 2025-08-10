@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ai-history-api
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: "npm ci && npm run build"
+    startCommand: "npm start"
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 8080
+      - key: PERPLEXITY_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PX_WIKI_TIMEOUT_MS
+        value: "8000"
