@@ -1,25 +1,21 @@
-export type Kind = "event" | "birth" | "death";
-
-export type PXItem = {
-  title: string;
-  year?: string;
-  note?: string;
-  px_rank: number;
-};
-
 export type EventItem = {
-  kind: Kind;
+  kind: "event" | "birth" | "death";
   title: string;
   year?: string;
   text?: string;
-  pageUrl?: string | null;
-
-  // computed/flow fields
-  px_rank?: number;
   summary?: string;
   date_iso?: string | null;
-  display_date?: string;
-  is_indian?: boolean;
+  display_date?: string | undefined;
+  verified_day?: boolean;
+  is_indian: boolean;
   score?: number;
+  px_rank?: number;
   sources?: { wikipedia_page?: string | null };
+};
+
+export type PXItem = {
+  px_rank: number;
+  title: string;
+  year: string;
+  note: string;
 };
