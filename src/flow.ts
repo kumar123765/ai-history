@@ -1,5 +1,9 @@
+// src/flow.ts
 import { StateGraph, Annotation, END } from "@langchain/langgraph";
-import { EventItem, PXItem } from "./types.js";
+
+import type { EventItem } from "./types.js";
+import type { PXItem } from "./helpers/px.js";
+
 import {
   parseISODateUTC,
   monthsFull,
@@ -8,20 +12,24 @@ import {
   trimSummary,
   norm,
 } from "./helpers/utils.js";
+
 import {
   wikiOnThisDay,
   extractWikiList,
   requireDateConsensus,
   wikiSummaryByTitle,
 } from "./helpers/wiki.js";
+
 import { perplexityEvents } from "./helpers/px.js";
+
 import {
   scoreEvent,
-  semanticTitle,
+  // semanticTitle,   // keep handy if you prefer semantic retitling
   classifyIndian,
 } from "./helpers/signals.js";
 
-/** ---------- Selector helpers ---------- */
+/* ------------------------ selection utilities ------------------------ */
+
 function pickWithBounds(
   events: EventItem[],
   total: number,
@@ -132,14 +140,15 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
   return trimmed;
 }
 
-/** ---------- LangGraph v0.4 State ---------- */
+/* ----------------------------- LangGraph state ----------------------------- */
+
 const S = Annotation.Root({
   date: Annotation<string>(),
   limit: Annotation<number>(),
 
   mm: Annotation<string | undefined>(),
   dd: Annotation<string | undefined>(),
-  readableDate: Annotation<string | undefined>(),
+  readableDate: Annotation<string | undefined>() ,
 
   wiki: Annotation<EventItem[] | undefined>(),
   px: Annotation<PXItem[] | undefined>(),
@@ -151,6 +160,7 @@ const S = Annotation.Root({
 });
 
 export const app = new StateGraph(S)
+  /* 1) Normalize date */
   .addNode("normalizeDate", async (state) => {
     const d = parseISODateUTC(state.date);
     return {
@@ -160,14 +170,13 @@ export const app = new StateGraph(S)
     };
   })
 
+  /* 2) Fetch Wikipedia + PX in parallel with timeout */
   .addNode("fetchInParallel", async (state) => {
     const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 15000);
     const withTimeout = <T>(p: Promise<T>) =>
       Promise.race<T>([
         p,
-        new Promise<T>((_, rej) =>
-          setTimeout(() => rej(new Error("PX_WIKI_HARD_TIMEOUT")), timeout)
-        ),
+        new Promise<T>((_, rej) => setTimeout(() => rej(new Error("PX_WIKI_HARD_TIMEOUT")), timeout)),
       ]);
 
     const [ev, br, de, px] = await Promise.all([
@@ -183,43 +192,58 @@ export const app = new StateGraph(S)
     };
   })
 
-  /** India top-up if needed */
+  /* 3) India-only Perplexity top-up trigger (word-boundary based) */
   .addNode("indiaTopup", async (state) => {
     const total = Math.min(Math.max(state.limit || 25, 10), 30);
     const minIndian = Math.round(total * 0.6);
 
-    // quick count using raw PX (best-effort before verification)
-    const pxIndianGuess = (state.px || []).filter(p => /india|isro|delhi|mumbai|kolkata|chennai|british raj|lok sabha|rajya sabha|constitution of india|article 370|ram mandir|ipl|bollywood/i.test(`${p.title} ${p.note}`)).length;
+    const indiaWord = /\bindia\b|\bindian\b|\bisro\b|\bdrdo\b|\b(parliament of india)\b|\b(lok sabha)\b|\b(rajya sabha)\b|\b(constitution of india)\b|\b(article 370)\b|\b(chandrayaan)\b|\b(mangalyaan)\b|\b(new delhi|delhi|mumbai|bombay|kolkata|calcutta|chennai|madras)\b/i;
+    const pxIndianGuess = (state.px || []).filter((p) => indiaWord.test(`${p.title} ${p.note}`)).length;
 
     if (pxIndianGuess >= minIndian) {
       return { px_india: [] as PXItem[] };
     }
-    // fetch an India-only PX set
-    const pxInd = await perplexityEvents(state.readableDate!, state.mm!, state.dd!, { indiaOnly: true }).catch(() => []);
+    const pxInd = await perplexityEvents(state.readableDate!, state.mm!, state.dd!, { indiaOnly: true }).catch(
+      () => []
+    );
     return { px_india: pxInd as PXItem[] };
   })
 
+  /* 4) Verify against Wikipedia/Wikidata (try exact OTD page title first), merge & score */
   .addNode("verifyAndMerge", async (state) => {
     const { mm, dd, readableDate } = state;
 
     const pxAll: PXItem[] = [...(state.px || []), ...(state.px_india || [])];
-
     const verifiedFromPx: EventItem[] = [];
+
     for (const e of pxAll) {
       const yNum = /^\-?\d+$/.test(e.year || "") ? Number(e.year) : undefined;
-      let best: EventItem | null = null, bestScore = 0;
+      let best: any = null,
+        bestScore = 0;
 
-      for (const w of (state.wiki || [])) {
+      for (const w of state.wiki || []) {
         if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum) continue;
         const score = Math.max(jaccard(e.title, w.title), jaccard(e.title, w.text || ""));
-        if (score > bestScore) { bestScore = score; best = w; }
+        if (score > bestScore) {
+          bestScore = score;
+          best = w;
+        }
       }
       if (!best || bestScore < 0.6) continue;
 
       const strict =
         /treaty|accord|agreement/i.test(best.title) ||
         /treaty|accord|agreement/i.test(best.text || "");
-      const gate = await requireDateConsensus(best.title || e.title, best.kind, mm!, dd!, strict);
+
+      // verify using exact feed page_title first, fallback to display title
+      const gate = await requireDateConsensus(
+        best.page_title || undefined,
+        best.title || e.title,
+        best.kind,
+        mm!,
+        dd!,
+        strict
+      );
       if (!gate.ok) continue;
 
       const yr = best.year ?? e.year ?? "";
@@ -228,18 +252,17 @@ export const app = new StateGraph(S)
 
       const rawTitle = best.title || e.title;
       const rawText = best.text || e.note || "";
-      const semTitle = semanticTitle(best.kind, rawTitle, rawText);
 
       const prelim: EventItem = {
         kind: best.kind,
-        title: semTitle,
+        title: rawTitle, // keep raw display title (more specific)
         year: String(yr || ""),
         summary: trimSummary((best.text || "") + (e.note ? ` ${e.note}` : "")),
         date_iso,
         display_date: disp,
         verified_day: Boolean(gate.iso),
         is_indian: false,
-        sources: { wikipedia_page: (best.sources && best.sources.wikipedia_page) ? best.sources.wikipedia_page : null },
+        sources: { wikipedia_page: best.sources?.wikipedia_page || null },
         px_rank: e.px_rank,
       };
 
@@ -250,32 +273,36 @@ export const app = new StateGraph(S)
 
     const wikiDirect = (
       await Promise.all(
-        (state.wiki || []).map(async (w) => {
+        (state.wiki || []).map(async (w: any) => {
           const isTreaty =
             /treaty|accord|agreement/i.test(w.title) ||
             /treaty|accord|agreement/i.test(w.text || "");
-          const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, isTreaty);
+          const gate = await requireDateConsensus(
+            w.page_title || undefined,
+            w.title,
+            w.kind,
+            mm!,
+            dd!,
+            isTreaty
+          );
           if (!gate.ok && isTreaty) return null;
 
           const yr = w.year ?? "";
           const date_iso = gate.iso ?? null;
           const disp = gate.iso ? readableDate : undefined;
 
-          const semTitle = semanticTitle(w.kind, w.title, w.text || "");
           const prelim: EventItem = {
             kind: w.kind,
-            title: semTitle,
+            title: w.title,
             year: String(yr || ""),
             summary: trimSummary(w.text || ""),
             date_iso,
             display_date: disp,
             verified_day: Boolean(gate.iso),
-            is_indian: false,
-            sources: { wikipedia_page: (w.sources && w.sources.wikipedia_page) ? w.sources.wikipedia_page : null },
+            is_indian: classifyIndian(`${w.title} ${w.text || ""}`),
+            sources: { wikipedia_page: w.sources?.wikipedia_page || null },
             px_rank: undefined,
           };
-
-          prelim.is_indian = classifyIndian(`${w.title} ${w.text || ""}`);
           prelim.score = scoreEvent(prelim);
           return prelim;
         })
@@ -297,16 +324,19 @@ export const app = new StateGraph(S)
     }
 
     out.sort((a, b) => {
-      const ap = a.px_rank ? 0 : 1, bp = b.px_rank ? 0 : 1;
+      const ap = a.px_rank ? 0 : 1,
+        bp = b.px_rank ? 0 : 1;
       return ap !== bp ? ap - bp : (b.score || 0) - (a.score || 0);
     });
 
     return { merged: out };
   })
 
+  /* 5) Selection + caps */
   .addNode("selectEnforce", async (state) => {
     const total = Math.min(Math.max(state.limit || 25, 10), 30);
-    const minI = Math.round(total * 0.6), maxI = Math.round(total * 0.8);
+    const minI = Math.round(total * 0.6);
+    const maxI = Math.round(total * 0.8);
 
     let sel = pickWithBounds(state.merged || [], total, minI, maxI);
     sel = enforceBirthDeathCap(sel, state.merged || [], 6, total);
@@ -315,9 +345,13 @@ export const app = new StateGraph(S)
     return { selected: sel };
   })
 
+  /* 6) Enrichment (wiki summary + PX note if helpful) */
   .addNode("enrich", async (state) => {
     const pxNotes = new Map(
-      ([...(state.px || []), ...(state.px_india || [])]).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
+      ([...(state.px || []), ...(state.px_india || [])]).map((p) => [
+        norm(stripKnownPrefixAll(p.title)),
+        p.note || "",
+      ])
     );
 
     const enriched = await Promise.all(
@@ -344,21 +378,23 @@ export const app = new StateGraph(S)
   .setEntryPoint("normalizeDate")
   .compile();
 
-/** ---------- Public runner ---------- */
+/* ------------------------------ public runner ------------------------------ */
+
 export async function runEventsFlow(date: string, limit = 25) {
   const result = await app.invoke({ date, limit });
   const events = (result.events || []).map((e: any) => ({
     title: e.title,
     summary: e.summary,
-    date_iso: e.date_iso,
-    display_date: e.display_date,
+    date_iso: e.date_iso ?? null,
+    display_date: e.display_date ?? undefined,
     year: e.year,
     kind: e.kind,
-    is_indian: e.is_indian,
-    verified_day: e.verified_day,
+    is_indian: Boolean(e.is_indian),
+    verified_day: Boolean(e.verified_day),
     score: e.score,
     sources: e.sources,
   }));
+
   return {
     success: true,
     date,
