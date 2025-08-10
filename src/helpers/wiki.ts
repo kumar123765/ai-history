@@ -44,11 +44,13 @@ export async function wikiSummaryByTitle(title: string) {
   return typeof extract === "string" && extract.length ? extract : null;
 }
 
-/** Extract list from 3 feeds (events/births/deaths) with sanitized titles */
+/** Extract list from 3 feeds (events/births/deaths) with sanitized titles.
+ *  Accepts partial shapes so callers can pass fallbacks like { events: [] }.
+ */
 export function extractWikiList(
-  ev: OnThisDayEvents,
-  br: OnThisDayBirths,
-  de: OnThisDayDeaths
+  ev: { events?: FeedEvent[] } | null | undefined,
+  br: { births?: FeedEvent[] } | null | undefined,
+  de: { deaths?: FeedEvent[] } | null | undefined
 ) {
   const out: Array<{
     kind: "event" | "birth" | "death";
@@ -59,12 +61,10 @@ export function extractWikiList(
     sources?: { wikipedia_page?: string | null };
   }> = [];
 
-  const pushIt = (
-    kind: "event" | "birth" | "death",
-    it?: FeedEvent
-  ) => {
+  const pushIt = (kind: "event" | "birth" | "death", it?: FeedEvent) => {
     if (!it) return;
     const p0 = it.pages?.[0];
+
     // Prefer normalized "titles.normalized" (plain text), fallback to normalizedtitle, then display.
     const rawDisplay =
       p0?.titles?.normalized ??
@@ -79,7 +79,7 @@ export function extractWikiList(
     out.push({
       kind,
       year: it.year,
-      title: display,            // sanitized for UI
+      title: display,                  // sanitized for UI
       page_title: pageTitle || undefined, // raw page title for verification
       text: trimSummary(String(it?.text || "")),
       sources: {
@@ -89,8 +89,8 @@ export function extractWikiList(
   };
 
   (ev?.events || []).forEach((it) => pushIt("event", it));
-  (br as any)?.births?.forEach((it: FeedEvent) => pushIt("birth", it));
-  (de as any)?.deaths?.forEach((it: FeedEvent) => pushIt("death", it));
+  (br?.births || []).forEach((it) => pushIt("birth", it));
+  (de?.deaths || []).forEach((it) => pushIt("death", it));
 
   return out;
 }
@@ -210,7 +210,7 @@ export async function requireDateConsensus(
   if (stricter) return { ok: false, via: "strict-mismatch", iso: null };
 
   // Birth/death: if neither source yields a day, allow lenient pass
-  if ((kind === "birth" || kind === "death")) {
+  if (kind === "birth" || kind === "death") {
     return { ok: true, via: "lenient-no-day-found", iso: null };
   }
 
