@@ -18,8 +18,7 @@ import { perplexityEvents } from "./helpers/px.js";
 import {
   scoreEvent,
   semanticTitle,
-  indianSignalScore,
-  isIndianText,
+  classifyIndian,
 } from "./helpers/signals.js";
 
 /** ---------- Selector helpers ---------- */
@@ -188,18 +187,14 @@ export const app = new StateGraph(S)
     const { mm, dd, readableDate } = state;
 
     const verifiedFromPx: EventItem[] = [];
-    for (const e of state.px || []) {
+    for (const e of (state.px || [])) {
       const yNum = /^\-?\d+$/.test(e.year || "") ? Number(e.year) : undefined;
-      let best: EventItem | null = null,
-        bestScore = 0;
+      let best: EventItem | null = null, bestScore = 0;
 
-      for (const w of state.wiki || []) {
+      for (const w of (state.wiki || [])) {
         if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum) continue;
         const score = Math.max(jaccard(e.title, w.title), jaccard(e.title, w.text || ""));
-        if (score > bestScore) {
-          bestScore = score;
-          best = w;
-        }
+        if (score > bestScore) { bestScore = score; best = w; }
       }
       if (!best || bestScore < 0.6) continue;
 
@@ -227,14 +222,14 @@ export const app = new StateGraph(S)
         date_iso,
         display_date: disp,
         verified_day: Boolean(gate.iso),
-        is_indian: false, // init
-        sources: { wikipedia_page: (best as any).pageUrl ?? null },
+        is_indian: false,
+        // ✅ source from the field we already keep
+        sources: { wikipedia_page: (best.sources && best.sources.wikipedia_page) ? best.sources.wikipedia_page : null },
         px_rank: e.px_rank,
       };
 
-      // Set Indian flag
-      const indScore = indianSignalScore(`${rawTitle} ${rawText}`);
-      prelim.is_indian = isIndianText(`${rawTitle} ${rawText}`) || indScore >= 15;
+      // Indian flag (anchor or high score)
+      prelim.is_indian = classifyIndian(`${rawTitle} ${rawText}`);
 
       prelim.score = scoreEvent(prelim);
       verifiedFromPx.push(prelim);
@@ -266,15 +261,13 @@ export const app = new StateGraph(S)
             date_iso,
             display_date: disp,
             verified_day: Boolean(gate.iso),
-            is_indian: false, // init
-            sources: { wikipedia_page: (w as any).pageUrl ?? null },
+            is_indian: false,
+            // ✅ use sources.wikipedia_page correctly
+            sources: { wikipedia_page: (w.sources && w.sources.wikipedia_page) ? w.sources.wikipedia_page : null },
             px_rank: undefined,
           };
 
-          // Set Indian flag
-          const indScore = indianSignalScore(`${w.title} ${w.text || ""}`);
-          prelim.is_indian = isIndianText(`${w.title} ${w.text || ""}`) || indScore >= 15;
-
+          prelim.is_indian = classifyIndian(`${w.title} ${w.text || ""}`);
           prelim.score = scoreEvent(prelim);
           return prelim;
         })
@@ -296,8 +289,7 @@ export const app = new StateGraph(S)
     }
 
     out.sort((a, b) => {
-      const ap = a.px_rank ? 0 : 1,
-        bp = b.px_rank ? 0 : 1;
+      const ap = a.px_rank ? 0 : 1, bp = b.px_rank ? 0 : 1;
       return ap !== bp ? ap - bp : (b.score || 0) - (a.score || 0);
     });
 
@@ -306,8 +298,7 @@ export const app = new StateGraph(S)
 
   .addNode("selectEnforce", async (state) => {
     const total = Math.min(Math.max(state.limit || 25, 10), 30);
-    const minI = Math.round(total * 0.6),
-      maxI = Math.round(total * 0.8);
+    const minI = Math.round(total * 0.6), maxI = Math.round(total * 0.8);
 
     let sel = pickWithBounds(state.merged || [], total, minI, maxI);
     sel = enforceBirthDeathCap(sel, state.merged || [], 6, total);
@@ -336,14 +327,11 @@ export const app = new StateGraph(S)
     return { events: enriched };
   })
 
-  // Edges
   .addEdge("normalizeDate", "fetchInParallel")
   .addEdge("fetchInParallel", "verifyAndMerge")
   .addEdge("verifyAndMerge", "selectEnforce")
   .addEdge("selectEnforce", "enrich")
   .addEdge("enrich", END)
-
-  // Entry
   .setEntryPoint("normalizeDate")
   .compile();
 
