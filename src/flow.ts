@@ -211,7 +211,7 @@ export const app = new StateGraph(S)
 
       const yr = best.year ?? e.year ?? "";
 
-      // ✅ Only set day if verified
+      // Only set day if verified
       const date_iso = gate.iso ?? null;
       const disp = gate.iso ? readableDate : undefined;
 
@@ -227,12 +227,12 @@ export const app = new StateGraph(S)
         date_iso,
         display_date: disp,
         verified_day: Boolean(gate.iso),
-        is_indian: undefined, // set below
+        is_indian: false, // init
         sources: { wikipedia_page: (best as any).pageUrl ?? null },
         px_rank: e.px_rank,
       };
 
-      // ✅ Indian flag
+      // Set Indian flag
       const indScore = indianSignalScore(`${rawTitle} ${rawText}`);
       prelim.is_indian = isIndianText(`${rawTitle} ${rawText}`) || indScore >= 15;
 
@@ -253,7 +253,7 @@ export const app = new StateGraph(S)
 
           const yr = w.year ?? "";
 
-          // ✅ Only set day if verified
+          // Only set day if verified
           const date_iso = gate.iso ?? null;
           const disp = gate.iso ? readableDate : undefined;
 
@@ -266,12 +266,12 @@ export const app = new StateGraph(S)
             date_iso,
             display_date: disp,
             verified_day: Boolean(gate.iso),
-            is_indian: undefined, // set below
+            is_indian: false, // init
             sources: { wikipedia_page: (w as any).pageUrl ?? null },
             px_rank: undefined,
           };
 
-          // ✅ Indian flag
+          // Set Indian flag
           const indScore = indianSignalScore(`${w.title} ${w.text || ""}`);
           prelim.is_indian = isIndianText(`${w.title} ${w.text || ""}`) || indScore >= 15;
 
@@ -375,4 +375,3 @@ export async function runEventsFlow(date: string, limit = 25) {
     events,
   };
 }
-
