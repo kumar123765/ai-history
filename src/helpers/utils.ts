@@ -78,3 +78,20 @@ export function trimSummary(text: string, max = 560) {
   }
   return clean;
 }
+
+/** Minimal HTML decode (covers common entities we see from Wiki headings) */
+export function htmlDecode(s: string) {
+  return String(s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+/** Strip HTML tags safely from short strings (titles/inline) */
+export function stripHtml(s: string) {
+  return htmlDecode(String(s || "").replace(/<[^>]*>/g, "")).trim();
+}
+
