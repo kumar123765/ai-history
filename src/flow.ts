@@ -1,4 +1,3 @@
-// src/flow.ts
 import { StateGraph, END } from "@langchain/langgraph";
 import { EventItem, PXItem } from "./types.js";
 import {
@@ -28,7 +27,7 @@ type S = {
   px?: PXItem[];
   merged?: EventItem[];
   selected?: EventItem[];
-  events?: EventItem[];
+  events?: any[];
 };
 
 function pickWithBounds(
@@ -43,15 +42,19 @@ function pickWithBounds(
   const globalAll = events
     .filter((e) => !e.is_indian)
     .sort((a, b) => (b.score || 0) - (a.score || 0));
+
   let indianTarget = Math.max(
     indianMin,
     Math.min(indianMax, Math.round(total * 0.6))
   );
+
   let out = [
     ...indianAll.slice(0, indianTarget),
     ...globalAll.slice(0, total - Math.min(indianAll.length, indianTarget)),
   ];
+
   let curIndian = out.filter((e) => e.is_indian).length;
+
   if (curIndian < indianMin) {
     const needed = indianMin - curIndian;
     const candidates = indianAll
@@ -61,6 +64,7 @@ function pickWithBounds(
     out = out.sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, total);
     curIndian = out.filter((e) => e.is_indian).length;
   }
+
   if (curIndian > indianMax) {
     const excess = curIndian - indianMax;
     const globalsLeft = globalAll
@@ -79,32 +83,30 @@ function pickWithBounds(
     out.push(...globalsLeft);
     out = out.sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, total);
   }
+
   if (out.length < total) {
-    out.push(
-      ...events.filter((e) => !out.includes(e)).slice(0, total - out.length)
-    );
+    out.push(...events.filter((e) => !out.includes(e)).slice(0, total - out.length));
     out = out.slice(0, total);
   }
   return out;
 }
 
-function enforceBirthDeathCap(
-  sel: EventItem[],
-  pool: EventItem[],
-  cap: number
-) {
+function enforceBirthDeathCap(sel: EventItem[], pool: EventItem[], cap: number) {
   const bd = sel.filter((e) => e.kind === "birth" || e.kind === "death");
   if (bd.length <= cap) return sel;
+
   const toRemove = bd
     .sort((a, b) => (a.score || 0) - (b.score || 0))
     .slice(0, bd.length - cap);
   const rem = new Set(toRemove.map((e) => e.title + "|" + e.year));
   let trimmed = sel.filter((e) => !rem.has(e.title + "|" + e.year));
+
   const inKey = (e: EventItem) => e.title + "|" + e.year;
   const selectedKeys = new Set(trimmed.map(inKey));
   const eventPool = pool
     .filter((e) => e.kind === "event" && !selectedKeys.has(inKey(e)))
     .sort((a, b) => (b.score || 0) - (a.score || 0));
+
   for (const cand of eventPool) {
     if (trimmed.length >= sel.length) break;
     trimmed.push(cand);
@@ -118,18 +120,22 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
     /\b(battle|siege|crusade|skirmish)\b/i.test(x.summary || "");
   const battles = sel.filter(isBattle);
   if (battles.length <= cap) return sel;
+
   const toRemove = battles
     .sort((a, b) => (a.score || 0) - (b.score || 0))
     .slice(0, battles.length - cap);
   const rem = new Set(toRemove.map((e) => e.title + "|" + e.year));
   let trimmed = sel.filter((e) => !rem.has(e.title + "|" + e.year));
+
   const inKey = (e: EventItem) => e.title + "|" + e.year;
   const selectedKeys = new Set(trimmed.map(inKey));
   const nonBattlePool = pool
     .filter(
-      (e) => e.kind === "event" && !selectedKeys.has(inKey(e)) && !isBattle(e)
+      (e) =>
+        e.kind === "event" && !selectedKeys.has(inKey(e)) && !isBattle(e)
     )
     .sort((a, b) => (b.score || 0) - (a.score || 0));
+
   for (const cand of nonBattlePool) {
     if (trimmed.length >= sel.length) break;
     trimmed.push(cand);
@@ -137,48 +143,48 @@ function enforceBattleCap(sel: EventItem[], pool: EventItem[], cap: number) {
   return trimmed;
 }
 
-/** IMPORTANT: treat the graph as `any` so TS doesn't enforce LangGraph generics here */
-const graph: any = new (StateGraph as any)({ channels: {} });
-
-graph
-  .addNode("normalizeDate", async (s: S): Promise<Partial<S>> => {
+export const app = new StateGraph<S>({ channels: {} })
+  .addNode("normalizeDate", async (s) => {
     const d = parseISODateUTC(s.date);
-    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(d.getUTCDate()).padStart(2, "0");
-    const readableDate = `${monthsFull[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    return { mm, dd, readableDate };
+    s.mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    s.dd = String(d.getUTCDate()).padStart(2, "0");
+    s.readableDate = `${monthsFull[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    return s;
   })
-  .addNode("fetchInParallel", async (s: S): Promise<Partial<S>> => {
-    const controller = new AbortController();
+  .addNode("fetchInParallel", async (s) => {
+    // Hard timeout guard (best-effort)
     const timeout = Number(process.env.PX_WIKI_TIMEOUT_MS || 8000);
-    const id = setTimeout(() => controller.abort(), timeout);
-    try {
-      const [ev, br, de, px] = await Promise.all([
-        wikiOnThisDay(s.mm!, s.dd!, "events").catch(() => ({ events: [] })),
-        wikiOnThisDay(s.mm!, s.dd!, "births").catch(() => ({ births: [] })),
-        wikiOnThisDay(s.mm!, s.dd!, "deaths").catch(() => ({ deaths: [] })),
-        perplexityEvents(s.readableDate!, s.mm!, s.dd!).catch(() => []),
+
+    const withTimeout = <T>(p: Promise<T>) =>
+      Promise.race<T>([
+        p,
+        new Promise<T>((_, rej) =>
+          setTimeout(() => rej(new Error("PX_WIKI_HARD_TIMEOUT")), timeout)
+        ),
       ]);
-      const wiki = extractWikiList(ev, br, de);
-      return { wiki, px };
-    } finally {
-      clearTimeout(id);
-    }
+
+    const [ev, br, de, px] = await Promise.all([
+      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "events")).catch(() => ({ events: [] })),
+      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "births")).catch(() => ({ births: [] })),
+      withTimeout(wikiOnThisDay(s.mm!, s.dd!, "deaths")).catch(() => ({ deaths: [] })),
+      withTimeout(perplexityEvents(s.readableDate!, s.mm!, s.dd!)).catch(() => []),
+    ]);
+
+    s.wiki = extractWikiList(ev, br, de);
+    s.px = px as PXItem[];
+    return s;
   })
-  .addNode("verifyAndMerge", async (s: S): Promise<Partial<S>> => {
+  .addNode("verifyAndMerge", async (s) => {
     const { mm, dd, readableDate } = s;
 
     const verifiedFromPx: EventItem[] = [];
-    for (const e of (s.px ?? []) as PXItem[]) {
+    for (const e of s.px || []) {
       const yNum = /^\-?\d+$/.test(e.year || "") ? Number(e.year) : undefined;
-      let best: EventItem | null = null;
-      let bestScore = 0;
-      for (const w of (s.wiki ?? []) as EventItem[]) {
-        if (
-          yNum != null &&
-          /^\-?\d+$/.test(w.year || "") &&
-          Number(w.year) !== yNum
-        )
+      let best: EventItem | null = null,
+        bestScore = 0;
+
+      for (const w of s.wiki || []) {
+        if (yNum != null && /^\-?\d+$/.test(w.year || "") && Number(w.year) !== yNum)
           continue;
         const score = Math.max(
           jaccard(e.title, w.title),
@@ -190,6 +196,7 @@ graph
         }
       }
       if (!best || bestScore < 0.6) continue;
+
       const strict =
         /treaty|accord|agreement/i.test(best.title) ||
         /treaty|accord|agreement/i.test(best.text || "");
@@ -223,32 +230,26 @@ graph
         kind: best.kind,
         title: semTitle,
         year: String(yr || ""),
-        summary: (best.text || "") + (e.note ? ` ${e.note}` : ""),
+        summary: trimSummary((best.text || "") + (e.note ? ` ${e.note}` : "")),
         date_iso,
         display_date: disp,
         is_indian: undefined,
-        sources: { wikipedia_page: best.pageUrl ?? null },
+        sources: { wikipedia_page: (best as any).pageUrl ?? null },
         px_rank: e.px_rank,
       };
-      prelim.summary = trimSummary(prelim.summary || "");
       prelim.score = scoreEvent(prelim);
       verifiedFromPx.push(prelim);
     }
 
     const wikiDirect = (
       await Promise.all(
-        (s.wiki || []).map(async (w: EventItem) => {
+        (s.wiki || []).map(async (w) => {
           const strict =
             /treaty|accord|agreement/i.test(w.title) ||
             /treaty|accord|agreement/i.test(w.text || "");
-          const gate = await requireDateConsensus(
-            w.title,
-            w.kind,
-            mm!,
-            dd!,
-            strict
-          );
+          const gate = await requireDateConsensus(w.title, w.kind, mm!, dd!, strict);
           if (!gate.ok) return null;
+
           const yr = w.year ?? "";
           const date_iso = gate.iso
             ? gate.iso
@@ -261,6 +262,7 @@ graph
               : yr && /^\-?\d+$/.test(yr) && Number(yr) < 0
               ? `${readableDate}, ${Math.abs(Number(yr))} BCE`
               : readableDate;
+
           const semTitle = semanticTitle(w.kind, w.title, w.text || "");
           const prelim: EventItem = {
             kind: w.kind,
@@ -270,7 +272,7 @@ graph
             date_iso,
             display_date: disp,
             is_indian: undefined,
-            sources: { wikipedia_page: w.pageUrl ?? null },
+            sources: { wikipedia_page: (w as any).pageUrl ?? null },
             px_rank: undefined,
           };
           prelim.score = scoreEvent(prelim);
@@ -282,43 +284,46 @@ graph
     const items = [...verifiedFromPx, ...wikiDirect];
     const out: EventItem[] = [];
     for (const e of items) {
-      const dup = out.find(
-        (o) =>
-          e.year &&
-          o.year &&
-          String(e.year) === String(o.year) &&
-          jaccard(
-            stripKnownPrefixAll(e.title),
-            stripKnownPrefixAll(o.title)
-          ) > 0.72
-      );
+      const dup =
+        out.find(
+          (o) =>
+            e.year &&
+            o.year &&
+            String(e.year) === String(o.year) &&
+            jaccard(
+              stripKnownPrefixAll(e.title),
+              stripKnownPrefixAll(o.title)
+            ) > 0.72
+        ) || null;
       if (!dup) out.push(e);
     }
-    const merged = out.sort((a, b) => {
-      const ap = a.px_rank ? 0 : 1;
-      const bp = b.px_rank ? 0 : 1;
+
+    s.merged = out.sort((a, b) => {
+      const ap = a.px_rank ? 0 : 1,
+        bp = b.px_rank ? 0 : 1;
       return ap !== bp ? ap - bp : (b.score || 0) - (a.score || 0);
     });
-    return { merged };
+    return s;
   })
-  .addNode("selectEnforce", async (s: S): Promise<Partial<S>> => {
+  .addNode("selectEnforce", async (s) => {
     const total = Math.min(Math.max(s.limit || 25, 10), 30);
-    const minI = Math.round(total * 0.6);
-    const maxI = Math.round(total * 0.8);
+    const minI = Math.round(total * 0.6),
+      maxI = Math.round(total * 0.8);
+
     let sel = pickWithBounds(s.merged || [], total, minI, maxI);
     sel = enforceBirthDeathCap(sel, s.merged || [], 6);
     sel = enforceBattleCap(sel, s.merged || [], 3);
-    return { selected: sel };
+
+    s.selected = sel;
+    return s;
   })
-  .addNode("enrich", async (s: S): Promise<Partial<S>> => {
+  .addNode("enrich", async (s) => {
     const pxNotes = new Map(
-      (s.px ?? []).map((p: PXItem) => [
-        norm(stripKnownPrefixAll(p.title)),
-        p.note || "",
-      ])
+      (s.px || []).map((p) => [norm(stripKnownPrefixAll(p.title)), p.note || ""])
     );
-    const events = await Promise.all(
-      (s.selected ?? []).map(async (e: EventItem) => {
+
+    s.events = await Promise.all(
+      (s.selected || []).map(async (e) => {
         const guess = stripKnownPrefixAll(e.title);
         const sum = await wikiSummaryByTitle(guess).catch(() => null);
         if (sum && sum.length > (e.summary?.length || 0))
@@ -329,19 +334,21 @@ graph
         return e;
       })
     );
-    return { events };
+    return s;
   })
+  // normal edges
   .addEdge("normalizeDate", "fetchInParallel")
   .addEdge("fetchInParallel", "verifyAndMerge")
   .addEdge("verifyAndMerge", "selectEnforce")
   .addEdge("selectEnforce", "enrich")
-  .addEdge("enrich", END);
-
-export const app: any = graph.compile();
+  .addEdge("enrich", END)
+  // explicit entry point (fixes UnreachableNodeError)
+  .setEntryPoint("normalizeDate")
+  .compile();
 
 export async function runEventsFlow(date: string, limit = 25) {
-  const result = (await app.invoke({ date, limit } as S)) as S;
-  const events = (result.events ?? []).map((e: EventItem) => ({
+  const result = await app.invoke({ date, limit } as S);
+  const events = (result.events || []).map((e: any) => ({
     title: e.title,
     summary: e.summary,
     date_iso: e.date_iso,
@@ -357,14 +364,10 @@ export async function runEventsFlow(date: string, limit = 25) {
     date,
     totals: {
       returned: events.length,
-      indian: events.filter((x) => x.is_indian).length,
-      global: events.filter((x) => !x.is_indian).length,
-      births_deaths: events.filter(
-        (x) => x.kind === "birth" || x.kind === "death"
-      ).length,
-      battles: events.filter((x) =>
-        /\b(battle|siege|crusade|skirmish)\b/i.test(x.title)
-      ).length,
+      indian: events.filter((x: any) => x.is_indian).length,
+      global: events.filter((x: any) => !x.is_indian).length,
+      births_deaths: events.filter((x: any) => x.kind === "birth" || x.kind === "death").length,
+      battles: events.filter((x: any) => /\b(battle|siege|crusade|skirmish)\b/i.test(x.title)).length,
     },
     events,
   };
