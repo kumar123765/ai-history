@@ -1,8 +1,16 @@
 import { norm, stripParens } from "./utils.js";
 import type { EventItem } from "../types.js";
 
-/** ---- Indian detection (anchor-first, no generic terms) ---- */
-const INDIA_ANCHORS = [
+/** Build a \bword\b style regex that is case-insensitive and works for multi-word phrases. */
+function wordRx(term: string) {
+  // escape regex and wrap each token in \b ... \b, allow single spaces or hyphens between tokens
+  const esc = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = esc.split(/\s+/).map(t => `\\b${t}\\b`);
+  return new RegExp(parts.join(`[\\s-]+`), "i");
+}
+
+/** ---- Indian detection (word-boundary, no substring leaks like “Indochina”) ---- */
+const INDIA_TERMS = [
   "india","indian",
   "isro","drdo","iit","iisc",
   "british raj","mughal",
@@ -14,41 +22,40 @@ const INDIA_ANCHORS = [
   "new delhi","delhi","mumbai","bombay","kolkata","calcutta","chennai","madras",
   "bengal","punjab","gujarat","maharashtra","uttar pradesh","bihar","jharkhand","odisha",
   "kerala","tamil nadu","karnataka","andhra","telangana","assam"
-];
+].map(wordRx);
 
 const GLOBAL_TERMS = [
   "world war","treaty","armistice","nato","united nations","apollo","sputnik","moon landing","nobel",
   "revolution","cold war","eu","olympics","world record","pandemic","stock market crash","constitution","declaration"
-];
+].map(wordRx);
 
 export function isIndianText(t: string) {
   const x = norm(t);
-  return INDIA_ANCHORS.some((k) => x.includes(k));
+  return INDIA_TERMS.some(rx => rx.test(x));
 }
 export function isGlobalSignal(t: string) {
   const x = norm(t);
-  return GLOBAL_TERMS.some((k) => x.includes(k));
+  return GLOBAL_TERMS.some(rx => rx.test(x));
 }
 
-/** ✅ anchors-only; avoids false positives (e.g., “Vietnam War”). */
+/** ✅ precise India classification using word boundaries */
 export function classifyIndian(t: string) {
   return isIndianText(t);
 }
 
 /** ---- Scoring + semantic titles ---- */
-function includesAny(t: string, list: string[]) {
+function includesAny(t: string, list: RegExp[]) {
   const x = norm(t);
-  return list.some((k) => x.includes(k));
+  return list.some((rx) => rx.test(x));
 }
-function newsworthyBoost(t: string) {
-  const keywords = [
-    "apollo","sputnik","chandrayaan","mangalyaan","isro","nasa","spacecraft","satellite","mars","moon landing",
-    "nobel prize","treaty","accord","agreement","independence","constitution","amendment","supreme court","verdict","judgment",
-    "stock market","crash","recession","bank","budget","earthquake","cyclone","flood","tsunami",
-    "olympic","world cup","record","asian games"
-  ];
-  return includesAny(t, keywords) ? 10 : 0;
-}
+const NEWSWORTHY = [
+  "apollo","sputnik","chandrayaan","mangalyaan","isro","nasa","spacecraft","satellite","mars","moon landing",
+  "nobel prize","treaty","accord","agreement","independence","constitution","amendment","supreme court","verdict","judgment",
+  "stock market","crash","recession","bank","budget","earthquake","cyclone","flood","tsunami",
+  "olympic","world cup","record","asian games"
+].map(wordRx);
+
+function newsworthyBoost(t: string) { return includesAny(t, NEWSWORTHY) ? 10 : 0; }
 
 export function scoreEvent(e: EventItem) {
   let s = 45;
