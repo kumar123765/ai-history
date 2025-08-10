@@ -12,7 +12,7 @@ type S = {
   px?: PXItem[];
   merged?: EventItem[];
   selected?: EventItem[];
-  events?: any[];
+  events?: EventItem[];
 };
 
 function pickWithBounds(events: EventItem[], total: number, indianMin: number, indianMax: number) {
@@ -102,10 +102,10 @@ export const app = new StateGraph<S>({ channels: {} })
     const { mm, dd, readableDate } = s;
 
     const verifiedFromPx: EventItem[] = [];
-    for (const e of (s.px||[])) {
+    for (const e of (s.px ?? [] as PXItem[])) {
       const yNum = /^\-?\d+$/.test(e.year||"") ? Number(e.year) : undefined;
       let best: EventItem | null = null, bestScore = 0;
-      for (const w of (s.wiki || [])) {
+      for (const w of (s.wiki ?? [] as EventItem[])) {
         if (yNum!=null && /^\-?\d+$/.test(w.year||"") && Number(w.year) !== yNum) continue;
         const score = Math.max(jaccard(e.title, w.title), jaccard(e.title, w.text || ""));
         if (score > bestScore) { bestScore = score; best = w; }
@@ -193,7 +193,7 @@ export const app = new StateGraph<S>({ channels: {} })
   })
   .addNode("enrich", async (s) => {
     const pxNotes = new Map((s.px||[]).map(p => [norm(stripKnownPrefixAll(p.title)), p.note||""]));
-    s.events = await Promise.all((s.selected||[]).map(async (e) => {
+    s.events = await Promise.all((s.selected ?? [] as EventItem[]).map(async (e: EventItem) => {
       const guess = stripKnownPrefixAll(e.title);
       const sum = await wikiSummaryByTitle(guess).catch(()=>null);
       if (sum && sum.length > (e.summary?.length || 0)) e.summary = trimSummary(sum);
@@ -212,7 +212,7 @@ export const app = new StateGraph<S>({ channels: {} })
 
 export async function runEventsFlow(date: string, limit = 25) {
   const result = await app.invoke({ date, limit } as S);
-  const events = (result.events||[]).map((e:any)=>({
+  const events = (result.events ?? [] as EventItem[]).map((e: EventItem)=>({
     title: e.title, summary: e.summary, date_iso: e.date_iso, display_date: e.display_date,
     year: e.year, kind: e.kind, is_indian: e.is_indian, score: e.score, sources: e.sources
   }));
@@ -221,10 +221,10 @@ export async function runEventsFlow(date: string, limit = 25) {
     date,
     totals: {
       returned: events.length,
-      indian: events.filter((x:any)=>x.is_indian).length,
-      global: events.filter((x:any)=>!x.is_indian).length,
-      births_deaths: events.filter((x:any)=>x.kind==="birth"||x.kind==="death").length,
-      battles: events.filter((x:any)=>/\b(battle|siege|crusade|skirmish)\b/i.test(x.title)).length
+      indian: events.filter((x)=>x.is_indian).length,
+      global: events.filter((x)=>!x.is_indian).length,
+      births_deaths: events.filter((x)=>x.kind==="birth"||x.kind==="death").length,
+      battles: events.filter((x)=>/\b(battle|siege|crusade|skirmish)\b/i.test(x.title)).length
     },
     events
   };
