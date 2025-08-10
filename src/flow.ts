@@ -1,3 +1,4 @@
+// src/flow.ts
 import {
   wikiOnThisDay,
   wikiSummaryByTitle,
@@ -15,11 +16,12 @@ import {
   stripKnownPrefixAll,
   jaccard,
   trimSummary,
-  isIndianText,
-  indianSignalScore,
   isoToDisplay,
   stripHtml,
+  isIndianText,
+  indianSignalScore,
 } from "./helpers/utils.js";
+import { wikidataCountryCodes, guessCountryByText } from "./helpers/country.js";
 
 type Kind = "event" | "birth" | "death";
 
@@ -50,7 +52,7 @@ const INDIAN_LOW = 0.60;  // 60%
 const INDIAN_HIGH = 0.70; // 70%
 
 function semanticTitle(kind: Kind, rawTitle: string, rawText: string) {
-  const base = stripKnownPrefixAll(rawTitle).replace(/\s+/g, " ").trim();
+  const base = stripKnownPrefixAll(stripHtml(rawTitle)).replace(/\s+/g, " ").trim();
   const text = norm(rawText);
   if (kind === "birth") return `Birthday of ${base}`;
   if (kind === "death") return `Death of ${base}`;
@@ -70,7 +72,7 @@ function semanticTitle(kind: Kind, rawTitle: string, rawText: string) {
   return `Event: ${base}`;
 }
 
-/** accept string | number | null to avoid TS errors */
+/** accepts string | number | null to avoid TS mismatch */
 function baseScore(e: {
   title: string;
   summary: string;
@@ -80,12 +82,13 @@ function baseScore(e: {
 }): number {
   let s = 45;
 
-  // Coerce year if needed
   const y = typeof e.year === "string" ? parseInt(e.year, 10) : e.year;
 
+  // importance features
   s += indianSignalScore(`${e.title} ${e.summary}`);
+  if (e.is_indian) s += 6;               // direct boost for IN
   if (e.summary.length > 180) s += 4;
-  if (y && y < 1900) s += 2;
+  if (y && y < 1900) s += 2;             // slightly favor older historically notable
   if (e.kind === "birth" || e.kind === "death") s -= 4;
 
   const isBattle =
@@ -207,17 +210,34 @@ export async function runFlow(input: { date?: string; limit?: number }) {
 
   const wiki = await fetchAllWiki(mm, dd);
 
-  // Normalize + enrich
   const enriched: OutputEvent[] = [];
   for (const w of wiki) {
     const semTitle = semanticTitle(w.kind, w.title, w.text);
-    const isIndian = isIndianText(`${w.title} ${w.text}`) || indianSignalScore(`${w.title} ${w.text}`) >= 15;
 
-    // Try to verify exact day (best-effort)
+    // --- Country-code driven India detection ---
+    let isIndian = false;
+    try {
+      const codes = await wikidataCountryCodes(stripKnownPrefixAll(w.title));
+      if (codes.has("IN")) {
+        isIndian = true;
+      } else {
+        const guess = guessCountryByText(w.title, w.text);
+        if (guess.has("IN")) isIndian = true;
+        else {
+          // softer backup: your original heuristics
+          isIndian = isIndianText(`${w.title} ${w.text}`) || indianSignalScore(`${w.title} ${w.text}`) >= 18;
+        }
+      }
+    } catch {
+      const guess = guessCountryByText(w.title, w.text);
+      isIndian = guess.has("IN") || isIndianText(`${w.title} ${w.text}`) || indianSignalScore(`${w.title} ${w.text}`) >= 18;
+    }
+
+    // Try to verify exact day
     let date_iso: string | null = null;
     let verified_day = false;
     if (w.title) {
-      const aud = await articleDateAuditISO(stripHtml(stripKnownPrefixAll(w.title)));
+      const aud = await articleDateAuditISO(stripKnownPrefixAll(stripHtml(w.title)));
       if (aud.iso) {
         if (aud.iso.slice(5, 7) === mm && aud.iso.slice(8, 10) === dd) {
           date_iso = aud.iso;
@@ -225,18 +245,18 @@ export async function runFlow(input: { date?: string; limit?: number }) {
         }
       }
     }
-    // Fallback YYYY-mm-dd if year is known (not verified)
+    // Fallback YYYY-mm-dd when year known
     if (!date_iso && w.year && w.year > 0) {
       date_iso = `${String(w.year).padStart(4, "0")}-${mm}-${dd}`;
     }
 
     let summary = trimSummary(w.text);
-    // Prefer Wikipedia summary if longer/better
+    // Prefer Wikipedia summary if better
     const baseTitleGuess = stripKnownPrefixAll(w.title);
     const sum = await wikiSummaryByTitle(baseTitleGuess).catch(() => null);
     if (sum && sum.length > summary.length) summary = trimSummary(sum);
 
-    const e: OutputEvent = {
+    const out: OutputEvent = {
       title: semTitle,
       summary,
       date_iso,
@@ -247,20 +267,25 @@ export async function runFlow(input: { date?: string; limit?: number }) {
       score: 0,
       sources: { wikipedia_page: w.pageUrl },
     };
-    e.score = baseScore(e);
-    enriched.push(e);
+    out.score = baseScore(out);
+    enriched.push(out);
   }
 
-  // Sort by score desc
-  let sorted = enriched.sort((a, b) => b.score - a.score);
+  // de-dupe by year+similar title
+  const dedup: OutputEvent[] = [];
+  for (const e of enriched) {
+    const dup = dedup.find(
+      (o) =>
+        (o.year && e.year && String(o.year) === String(e.year)) &&
+        jaccard(stripKnownPrefixAll(o.title), stripKnownPrefixAll(e.title)) > 0.72
+    );
+    if (!dup) dedup.push(e);
+  }
 
-  // Keep wider pool before enforcing mix
+  // sort, caps, indian share
+  let sorted = dedup.sort((a, b) => b.score - a.score);
   sorted = sorted.slice(0, Math.max(limit * 2, limit + 10));
-
-  // Enforce caps
   sorted = enforceCaps(sorted, Math.max(limit * 2, limit + 10));
-
-  // Retarget to Indian share (60–70%)
   const selected = retargetIndianShare(sorted, limit, INDIAN_LOW, INDIAN_HIGH);
 
   const totals = {
@@ -279,7 +304,7 @@ export async function runFlow(input: { date?: string; limit?: number }) {
   };
 }
 
-// Back-compat name if your caller imports runEventsFlow
+// Back-compat export
 export async function runEventsFlow(input: { date?: string; limit?: number }) {
   return runFlow(input);
 }
