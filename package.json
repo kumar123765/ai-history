@@ -1,24 +1,14 @@
 {
   "name": "ai-history",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "lint": "echo \"skip\""
+    "start": "node dist/index.js"
   },
-  "dependencies": {
-    "@langchain/langgraph": "^0.4.3",
-    "@langchain/core": "^0.3.68",
-    "fastify": "^4.28.1",
-    "undici": "^6.19.8"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.5.2",
-    "tsx": "^4.19.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "@types/node": "^22.5.0"
   }
 }
-
